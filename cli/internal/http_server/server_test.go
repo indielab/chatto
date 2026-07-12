@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -27,6 +29,121 @@ import (
 	configv1 "hmans.de/chatto/internal/pb/chatto/config/v1"
 	"hmans.de/chatto/internal/testutil"
 )
+
+func TestEnsureAutocertCacheDir(t *testing.T) {
+	t.Run("creates a private directory", func(t *testing.T) {
+		cacheDir := filepath.Join(t.TempDir(), "nested", "autocert")
+		if err := ensureAutocertCacheDir(cacheDir); err != nil {
+			t.Fatalf("ensureAutocertCacheDir() error = %v", err)
+		}
+		assertPathMode(t, cacheDir, autocertCacheDirMode)
+	})
+
+	t.Run("preserves a private directory", func(t *testing.T) {
+		cacheDir := filepath.Join(t.TempDir(), "autocert")
+		if err := os.Mkdir(cacheDir, autocertCacheDirMode); err != nil {
+			t.Fatalf("Mkdir() error = %v", err)
+		}
+		if err := ensureAutocertCacheDir(cacheDir); err != nil {
+			t.Fatalf("ensureAutocertCacheDir() error = %v", err)
+		}
+		assertPathMode(t, cacheDir, autocertCacheDirMode)
+	})
+
+	t.Run("repairs a permissive directory", func(t *testing.T) {
+		cacheDir := filepath.Join(t.TempDir(), "autocert")
+		if err := os.Mkdir(cacheDir, 0o755); err != nil {
+			t.Fatalf("Mkdir() error = %v", err)
+		}
+		if err := ensureAutocertCacheDir(cacheDir); err != nil {
+			t.Fatalf("ensureAutocertCacheDir() error = %v", err)
+		}
+		assertPathMode(t, cacheDir, autocertCacheDirMode)
+	})
+
+	t.Run("rejects a non-directory path", func(t *testing.T) {
+		cacheDir := filepath.Join(t.TempDir(), "autocert")
+		if err := os.WriteFile(cacheDir, []byte("not a directory"), 0o600); err != nil {
+			t.Fatalf("WriteFile() error = %v", err)
+		}
+		if err := ensureAutocertCacheDir(cacheDir); err == nil {
+			t.Fatal("ensureAutocertCacheDir() error = nil, want non-directory error")
+		}
+	})
+
+	t.Run("rejects a symlink", func(t *testing.T) {
+		parent := t.TempDir()
+		target := filepath.Join(parent, "target")
+		if err := os.Mkdir(target, autocertCacheDirMode); err != nil {
+			t.Fatalf("Mkdir() error = %v", err)
+		}
+		cacheDir := filepath.Join(parent, "autocert")
+		if err := os.Symlink(target, cacheDir); err != nil {
+			t.Fatalf("Symlink() error = %v", err)
+		}
+		if err := ensureAutocertCacheDir(cacheDir); err == nil || !strings.Contains(err.Error(), "is not a directory") {
+			t.Fatalf("ensureAutocertCacheDir() error = %v, want symlink rejection", err)
+		}
+	})
+
+	t.Run("rejects a replaceable cache path", func(t *testing.T) {
+		parent := t.TempDir()
+		cacheDir := filepath.Join(parent, "autocert")
+		if err := os.Mkdir(cacheDir, autocertCacheDirMode); err != nil {
+			t.Fatalf("Mkdir() error = %v", err)
+		}
+		if err := os.Chmod(parent, 0o777); err != nil {
+			t.Fatalf("Chmod() error = %v", err)
+		}
+		if err := ensureAutocertCacheDir(cacheDir); err == nil || !strings.Contains(err.Error(), "writable by group or other users") {
+			t.Fatalf("ensureAutocertCacheDir() error = %v, want unsafe-parent rejection", err)
+		}
+	})
+
+	t.Run("rejects a directory owned by another user", func(t *testing.T) {
+		if os.Geteuid() != 0 {
+			t.Skip("changing directory ownership requires root")
+		}
+		cacheDir := filepath.Join(t.TempDir(), "autocert")
+		if err := os.Mkdir(cacheDir, autocertCacheDirMode); err != nil {
+			t.Fatalf("Mkdir() error = %v", err)
+		}
+		if err := os.Chown(cacheDir, 1, -1); err != nil {
+			t.Fatalf("Chown() error = %v", err)
+		}
+		if err := ensureAutocertCacheDir(cacheDir); err == nil || !strings.Contains(err.Error(), "is owned by uid") {
+			t.Fatalf("ensureAutocertCacheDir() error = %v, want ownership rejection", err)
+		}
+	})
+
+	t.Run("rejects a parent directory owned by another user", func(t *testing.T) {
+		if os.Geteuid() != 0 {
+			t.Skip("changing directory ownership requires root")
+		}
+		parent := t.TempDir()
+		cacheDir := filepath.Join(parent, "autocert")
+		if err := os.Mkdir(cacheDir, autocertCacheDirMode); err != nil {
+			t.Fatalf("Mkdir() error = %v", err)
+		}
+		if err := os.Chown(parent, 1, -1); err != nil {
+			t.Fatalf("Chown() error = %v", err)
+		}
+		if err := ensureAutocertCacheDir(cacheDir); err == nil || !strings.Contains(err.Error(), "parent directory") || !strings.Contains(err.Error(), "is owned by uid") {
+			t.Fatalf("ensureAutocertCacheDir() error = %v, want parent ownership rejection", err)
+		}
+	})
+}
+
+func assertPathMode(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat(%q) error = %v", path, err)
+	}
+	if got := info.Mode().Perm(); got != want {
+		t.Fatalf("mode = %04o, want %04o", got, want)
+	}
+}
 
 // ============================================================================
 // Content Type Detection Tests
