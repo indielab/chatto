@@ -47,7 +47,7 @@ has not declared a lower bound for the bundled Chatto web client.
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `protocol_capabilities` | `repeated string` | Stable protocol capability keys supported by this server. Current keys: `chatto.discovery.v1`, `chatto.auth.v1`, `chatto.api.v1`, `chatto.admin.v1`, and `chatto.realtime.v1`. |
+| `protocol_capabilities` | `repeated string` | Stable protocol capability keys supported by this server. Current keys: `chatto.discovery.v1`, `chatto.auth.v1`, `chatto.api.v1`, `chatto.admin.v1`, `chatto.realtime.v1`, and `chatto.realtime.projection.v1`. |
 | `minimum_web_client_version` | `optional string` | Oldest bundled Chatto web-client version this server supports, when a lower bound is required. Third-party clients should use capabilities. |
 
 <a id="chatto-api-v1-ImageTransformOptions"></a>
@@ -618,7 +618,9 @@ Cursor page of room or thread timeline events.
 
 Use opaque start_cursor and end_cursor values with before/after requests to
 continue paging in either direction. Clients must treat cursor values as
-server-owned tokens and must not parse or construct them. The has_older and
+server-owned tokens and must not parse, construct, share between users, or
+reuse them for another room or thread. The server binds each cursor to the
+authenticated viewer and exact timeline resource. The has_older and
 has_newer flags tell clients whether another request can extend the current
 window.
 

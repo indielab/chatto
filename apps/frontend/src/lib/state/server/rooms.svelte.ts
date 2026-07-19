@@ -1,13 +1,8 @@
 import { untrack } from 'svelte';
 import { SvelteMap } from 'svelte/reactivity';
 import { RoomType, type UserAvatarUserView } from '$lib/render/types';
-import {
-  isMessagePostedEvent,
-  RoomEventKind,
-  roomEventKind,
-  type RoomEventKindSource
-} from '$lib/render/eventKinds';
 import type {
+  DirectoryRoomGroup,
   DirectoryRoomGroupItem,
   DirectoryRoomSummary,
   RoomDirectoryAPI
@@ -177,23 +172,6 @@ function sameRoomGroups(
   });
 }
 
-const roomStateRefreshEvents = new Set<RoomEventKind>([
-  RoomEventKind.RoomCreated,
-  RoomEventKind.RoomDeleted,
-  RoomEventKind.RoomGroupsUpdated,
-  RoomEventKind.RoomUpdated,
-  RoomEventKind.RoomArchived,
-  RoomEventKind.RoomUnarchived,
-  RoomEventKind.RoomUniversalChanged,
-  RoomEventKind.UserJoinedRoom,
-  RoomEventKind.UserLeftRoom
-]);
-
-export function isRoomStateRefreshEvent(event: RoomEventKindSource): boolean {
-  const kind = roomEventKind(event);
-  return kind !== null && roomStateRefreshEvents.has(kind);
-}
-
 /**
  * Reactive store for a server's joined-room list, layout, and per-room
  * notification counts. One store per registered server, owned by
@@ -205,9 +183,8 @@ export function isRoomStateRefreshEvent(event: RoomEventKindSource): boolean {
  * Room read state is owned separately by `RoomUnreadStore` so the room list
  * and server indicator cannot maintain competing unread projections.
  *
- * Subscription events are forwarded via {@link ingestServerEvent}; the
- * server bundle forwards events from every server's bus so each server's
- * store stays current regardless of which one is active.
+ * Canonical room and viewer state is replaced by the server projection; the
+ * Connect API remains available for explicit paginated reads and commands.
  */
 export class RoomsStore {
   rooms = $state<RoomsListItem[]>([]);
@@ -298,6 +275,52 @@ export class RoomsStore {
     this.isInitialLoading = false;
   }
 
+  /** Replace navigation state from the server-wide realtime projection. */
+  replaceProjection(
+    viewer: ViewerState,
+    rooms: DirectoryRoomSummary[],
+    roomGroups: DirectoryRoomGroup[],
+    membersByRoomId: ReadonlyMap<string, UserAvatarUserView[]> = new SvelteMap(),
+    notificationCountsByRoomId: ReadonlyMap<string, number> = new SvelteMap()
+  ): void {
+    this.loadId++;
+    this.currentUserId = viewer.user.id;
+    this.notificationLevels.setServerPreference(
+      viewer.serverNotificationPreference.level,
+      viewer.serverNotificationPreference.effectiveLevel
+    );
+    for (const pref of viewer.roomNotificationPreferences) {
+      this.notificationLevels.setRoomPreference(pref.roomId, pref.level, pref.effectiveLevel);
+    }
+
+    const visibleRooms = uniqueById(rooms.filter((room) => !room.archived));
+    this.applyRooms(
+      visibleRooms.map((room) => ({
+        ...this.roomListItem(room, membersByRoomId.get(room.id) ?? []),
+        viewerNotificationCount: notificationCountsByRoomId.get(room.id) ?? 0
+      })),
+      false
+    );
+    this.roomUnread.initRooms(visibleRooms);
+    this.roomGroups = roomGroups.map((group) => ({
+      id: group.id,
+      name: group.name,
+      roomIds: group.roomIds,
+      items: group.items.map(roomGroupItem)
+    }));
+    this.isInitialLoading = false;
+  }
+
+  /** Invalidate all projection-owned navigation state during a reset. */
+  resetProjectionState(): void {
+    this.loadId++;
+    this.notificationCountsLoadId++;
+    this.rooms = [];
+    this.roomGroups = [];
+    this.currentUserId = null;
+    this.isInitialLoading = true;
+  }
+
   private roomListItem(room: DirectoryRoomSummary, members: UserAvatarUserView[]): RoomsListItem {
     return {
       id: room.id,
@@ -312,14 +335,16 @@ export class RoomsStore {
     };
   }
 
-  private applyRooms(nextRooms: RoomsListItem[]): void {
+  private applyRooms(nextRooms: RoomsListItem[], preserveNotificationCounts = true): void {
     const previousById = new SvelteMap(this.rooms.map((room) => [room.id, room]));
     let changed = this.rooms.length !== nextRooms.length;
     const merged = nextRooms.map((room, index) => {
       const previous = previousById.get(room.id);
       const next = {
         ...room,
-        viewerNotificationCount: previous?.viewerNotificationCount ?? room.viewerNotificationCount
+        viewerNotificationCount: preserveNotificationCounts
+          ? (previous?.viewerNotificationCount ?? room.viewerNotificationCount)
+          : room.viewerNotificationCount
       };
       if (!previous) {
         changed = true;
@@ -419,33 +444,6 @@ export class RoomsStore {
       if (idx === -1) return;
       this.rooms[idx] = { ...this.rooms[idx], ...patch };
     });
-  }
-
-  // -------------------------------------------------------------------------
-  // Subscription event ingestion
-  // -------------------------------------------------------------------------
-
-  /**
-   * Refresh the room list when membership, room metadata, or group layout
-   * changes. Other event types (messages, reactions, presence) are no-ops at
-   * this level unless the message arrives for a room we don't yet know about —
-   * that's how a freshly-created empty DM (filtered from the active
-   * member-room DM list until its first message lands) shows up in the
-   * sidebar without a manual reload.
-   */
-  ingestServerEvent(serverEvent: { event?: RoomEventKindSource }): void {
-    const event = serverEvent.event;
-    if (!event) return;
-    if (isRoomStateRefreshEvent(event)) {
-      void this.refresh();
-      return;
-    }
-    if (isMessagePostedEvent(event)) {
-      const roomId = event.roomId;
-      if (roomId && !this.rooms.some((r) => r.id === roomId)) {
-        void this.refresh();
-      }
-    }
   }
 }
 
