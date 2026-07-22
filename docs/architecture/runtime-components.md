@@ -1,23 +1,37 @@
 # Runtime Component Inventory
 
-Key files: [`cli/internal/core/core.go`](../../cli/internal/core/core.go), [`cli/internal/core/*_model.go`](../../cli/internal/core/), [`cli/internal/video/service.go`](../../cli/internal/video/service.go)
+Key files: [`cli/cmd/run.go`](../../cli/cmd/run.go), [`cli/internal/runtimeunit/runtimeunit.go`](../../cli/internal/runtimeunit/runtimeunit.go), [`cli/internal/search/bleve/unit.go`](../../cli/internal/search/bleve/unit.go), [`cli/internal/core/core.go`](../../cli/internal/core/core.go), [`cli/internal/core/*_model.go`](../../cli/internal/core/), [`cli/internal/video/service.go`](../../cli/internal/video/service.go)
 
 The core runtime is process-local but must be safe under multiple Chatto replicas connected to the same NATS account. Correctness comes from JetStream/KV atomicity and projection catch-up, not in-process serialization.
 
-Related decisions: [ADR-033](../adr/ADR-033-event-sourced-state-with-projections.md)
-and [ADR-049](../adr/ADR-049-process-wide-realtime-event-hub.md).
+Related decisions: [ADR-033](../adr/ADR-033-event-sourced-state-with-projections.md),
+[ADR-041](../adr/ADR-041-runtime-units.md), and
+[ADR-049](../adr/ADR-049-process-wide-realtime-event-hub.md).
+
+`chatto run` composes optional runtime units from a validated catalogue. Each
+registration supplies the same `runtimeunit.Unit` used by its standalone
+command plus a config predicate controlling whether it starts in the main
+process. The exporter and bundled search provider are registered units;
+an embedded unit failure is logged and degrades that optional capability without
+stopping the core server, while the same failure still exits a standalone unit.
+Independently deployable providers use this catalogue rather than adding
+custom startup blocks.
 
 `ChattoCore` keeps a core model inventory with stable machine-readable keys such as `config_model`, `message_model`, and `my_events_model`. Per-process metrics expose these keys via `chatto_model_info`; `chatto_service_info` remains a deprecated compatibility alias that emits the previous `*_service` label values. Display names remain operator-facing text only.
 
 | Model                            | Key files                                                                                                                                                   | Responsibility                                                                                                                                |
 | -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ChattoCore`                     | [`core.go`](../../cli/internal/core/core.go)                                                                                                                    | Application facade, resource initialization, lifecycle, and intentional cross-package media/asset adapters                                     |
+| `ChattoCore`                     | [`core.go`](../../cli/internal/core/core.go)                                                                                                                    | Application facade, resource initialization, lifecycle, API-facing operations, and intentional cross-package media/asset adapters              |
+| Runtime-unit catalogue          | [`run.go`](../../cli/cmd/run.go), [`runtimeunit.go`](../../cli/internal/runtimeunit/runtimeunit.go)                                                              | Validated composition of optional units under `chatto run` using the same unit implementations as standalone commands                          |
+| `exporter.Unit`                 | [`unit.go`](../../cli/internal/exporter/unit.go)                                                                                                                 | Optional export runtime started by `[exporter].enabled` under `chatto run` or directly by its standalone command                               |
+| `bleve.Unit`                    | [`unit.go`](../../cli/internal/search/bleve/unit.go), [`search_provider.go`](../../cli/cmd/search_provider.go)                                                    | Bundled message-search provider with the runtime diagnostic identity `search.BleveProvider`, started by `[search_provider].enabled` under `chatto run` or as `chatto search-provider`; opens existing EVT and encryption resources without starting `ChattoCore`, exposes status during startup replay, and joins the shared query queue only after replay is current |
 | `MyEventsModel`                  | [`my_events_model.go`](../../cli/internal/core/my_events_model.go), [`realtime_replay.go`](../../cli/internal/core/realtime_replay.go)                           | Eagerly wired `myEvents` live delivery, bounded EVT-gap planning, projection readiness, heartbeats, per-user authorization, and process-local stream counters |
 | Realtime projection assembler   | [`realtime_projection.go`](../../cli/internal/connectapi/realtime_projection.go), [`realtime_projection.go`](../../cli/internal/http_server/realtime_projection.go) | Caller-authorized compacted server state and current public projection operations derived from durable/live facts without exposing EVT payloads |
 | `events.Publisher`              | [`publisher.go`](../../cli/internal/events/publisher.go)                                                                                                       | OCC-only writes to `EVT`, including atomic batches and filter-scoped concurrency guards                                                        |
 | `ConfigModel`                    | [`config_model.go`](../../cli/internal/core/config_model.go), [`server_config_model.go`](../../cli/internal/core/server_config_model.go)                        | Sole core boundary for semantic server/user config reads and event writes, including `ConfigProjection` readiness                              |
 | `NotificationPreferencesModel`   | [`notification_level.go`](../../cli/internal/core/notification_level.go)                                                                                        | Operation-level notification preference API with authZ before config preference writes                                                         |
 | `MessageModel`                   | [`message_model.go`](../../cli/internal/core/message_model.go), [`messages.go`](../../cli/internal/core/messages.go)                                              | Operation-level message posting API with room/thread authZ, post validation, and read-marker side effects                                      |
+| `MessageSearchReadModel`         | [`message_search_read_model.go`](../../cli/internal/core/message_search_read_model.go)                                                                            | Resolves provider queries to current member-room scopes and re-authorizes thin provider hits against current room membership and message state  |
 | `ReactionModel`                  | [`reaction_model.go`](../../cli/internal/core/reaction_model.go), [`reactions.go`](../../cli/internal/core/reactions.go)                                          | Operation-level reaction mutation API with actor membership and `message.react` authZ before room-aggregate reaction writes                    |
 | `RoomCommandModel`               | [`room_command_model.go`](../../cli/internal/core/room_command_model.go)                                                                                         | Operation-level room lifecycle, membership, moderation, and DM commands with public API authorization and room-kind preconditions              |
 | `RoomDirectoryReadModel`         | [`room_directory_read_model.go`](../../cli/internal/core/room_directory_read_model.go)                                                                           | Operation-level room directory and sidebar reads, viewer capability hydration, and directory-adjacent join commands                            |
